@@ -1,26 +1,66 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #484f58; }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.prose-chat { color: #e6edf3; font-size: 14px; line-height: 1.65; }
+.prose-chat p { margin: 0 0 0.6rem 0; color: #e6edf3; }
+.prose-chat p:last-child { margin-bottom: 0; }
+.prose-chat ul, .prose-chat ol { padding-left: 1.4rem; margin: 0.5rem 0; color: #e6edf3; }
+.prose-chat li { margin: 0.25rem 0; color: #e6edf3; }
+.prose-chat strong { color: #79c0ff; font-weight: 600; }
+.prose-chat em { color: #d2a8ff; }
+.prose-chat a { color: #58a6ff; text-decoration: underline; }
+.prose-chat code {
+  background: #1c2128;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.15rem 0.4rem;
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: #f0883e;
 }
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.prose-chat pre {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
 }
+.prose-chat pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #e6edf3;
+  font-size: 13px;
+}
+.prose-chat h1 { font-size: 18px; font-weight: 600; color: #e6edf3; margin: 1rem 0 0.4rem; }
+.prose-chat h2 { font-size: 16px; font-weight: 600; color: #e6edf3; margin: 0.75rem 0 0.3rem; }
+.prose-chat h3 { font-size: 14px; font-weight: 600; color: #e6edf3; margin: 0.5rem 0 0.25rem; }
+.prose-chat blockquote {
+  border-left: 3px solid #30363d;
+  padding-left: 1rem;
+  margin: 0.5rem 0;
+  color: #8b949e;
+}
+.prose-chat hr { border: none; border-top: 1px solid #21262d; margin: 0.75rem 0; }
+.prose-chat table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.prose-chat th { background: #161b22; color: #8b949e; padding: 6px 10px; border: 1px solid #30363d; font-weight: 500; text-align: left; }
+.prose-chat td { padding: 6px 10px; border: 1px solid #21262d; color: #e6edf3; }
+.prose-chat tr:nth-child(even) td { background: #0d1117; }

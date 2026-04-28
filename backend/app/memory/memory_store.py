@@ -64,7 +64,7 @@ class MemoryStore:
             session_id=session_id,
             role=role,
             content=content,
-            metadata=metadata or {},
+            metadata=metadata if isinstance(metadata, dict) else {},
         )
         self.db.add(msg)
         await self.db.commit()
@@ -80,25 +80,42 @@ class MemoryStore:
             .limit(limit)
         )
         messages = result.scalars().all()
+
         return [
-            {"role": m.role, "content": m.content, "metadata": m.metadata}
+            {
+                "role": m.role,
+                "content": m.content,
+                "metadata": m.metadata if isinstance(m.metadata, dict) else {},
+            }
             for m in reversed(messages)
         ]
 
     async def get_session_context(self, session_id: str) -> dict:
         """Extract structured context from session history."""
         history = await self.get_session_history(session_id)
+
         context = {
             "current_project_id": None,
             "current_project_name": None,
             "recent_task_ids": [],
         }
+
         for msg in history:
-            meta = msg.get("metadata", {})
+            # 🔥 SAFE METADATA HANDLING (FIX)
+            meta = msg.get("metadata") if isinstance(msg, dict) else {}
+
+            if not isinstance(meta, dict):
+                try:
+                    meta = meta.__dict__
+                except:
+                    meta = {}
+
             if meta.get("project_id"):
                 context["current_project_id"] = meta["project_id"]
                 context["current_project_name"] = meta.get("project_name")
+
             if meta.get("task_id"):
                 if meta["task_id"] not in context["recent_task_ids"]:
                     context["recent_task_ids"].append(meta["task_id"])
+
         return context

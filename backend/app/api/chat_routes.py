@@ -23,7 +23,10 @@ async def chat(
     try:
         zoho_client = ZohoClient(user=user, db=db)
         memory_store = MemoryStore(db=db, user_id=user.id)
-        graph = ZohoChatGraph(zoho_client=zoho_client, memory_store=memory_store)
+        graph = ZohoChatGraph(
+            zoho_client=zoho_client,
+            memory_store=memory_store
+        )
 
         result = await graph.chat(
             user_message=request.message,
@@ -33,14 +36,27 @@ async def chat(
             pending_action=getattr(request, "pending_action", None),
         )
 
+        # 🔥 FIX: Normalize result safely (dict OR object)
+        if isinstance(result, dict):
+            data = result
+        else:
+            data = getattr(result, "__dict__", {})
+
+        if not data:
+            raise HTTPException(
+                status_code=500,
+                detail="Invalid response from chatbot graph"
+            )
+
         return ChatResponse(
-            response=result["response"],
-            requires_confirmation=result.get("requires_confirmation", False),
-            pending_action=result.get("pending_action"),
+            response=data.get("response", ""),
+            requires_confirmation=data.get("requires_confirmation", False),
+            pending_action=data.get("pending_action"),
             session_id=request.session_id,
         )
 
     except Exception as e:
+        # Optional: log error here if needed
         raise HTTPException(status_code=500, detail=str(e))
 
 
