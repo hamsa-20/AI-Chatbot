@@ -1,4 +1,4 @@
-# Zoho Projects AI Chatbot
+# Zoho  AI Chatbot
 
 An AI-powered conversational chatbot that connects to Zoho Projects via its REST API. Users authenticate with their own Zoho OAuth credentials and interact through a chat UI using natural language. The backend is a multi-agent LangGraph system on FastAPI — one agent handles queries, another handles write actions with human-in-the-loop confirmation.
 
