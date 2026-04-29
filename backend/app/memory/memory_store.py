@@ -1,4 +1,6 @@
 import uuid
+import json
+import re
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -60,11 +62,6 @@ class MemoryStore:
         content: str,
         metadata: dict = None,
     ):
-        """
-        Save a chat message.
-        Uses 'msg_metadata' as the dict key internally to avoid any clash
-        with SQLAlchemy's own 'metadata' attribute on the model class.
-        """
         safe_meta = metadata if isinstance(metadata, dict) else {}
 
         self.db.add(ChatHistory(
@@ -73,9 +70,6 @@ class MemoryStore:
             session_id=session_id,
             role=role,
             content=content,
-            # Use the actual column name on your model.
-            # If your column is called `metadata`, keep it.
-            # If SQLAlchemy complains, rename the column to `msg_metadata`.
             metadata=safe_meta,
         ))
         await self.db.commit()
@@ -94,13 +88,8 @@ class MemoryStore:
 
         history = []
         for m in reversed(rows):
-            # Safely read metadata regardless of whether it came back as
-            # a dict, a SQLAlchemy object, or None.
             raw_meta = getattr(m, "metadata", None)
-            if isinstance(raw_meta, dict):
-                safe_meta = raw_meta
-            else:
-                safe_meta = {}
+            safe_meta = raw_meta if isinstance(raw_meta, dict) else {}
 
             history.append({
                 "role": m.role,
@@ -111,26 +100,77 @@ class MemoryStore:
         return history
 
     async def get_session_context(self, session_id: str) -> dict:
+        """
+        Build session context by scanning chat history for project/task references.
+        Also scans message content for embedded project info from list_projects tool output.
+        """
         history = await self.get_session_history(session_id)
 
         context = {
             "current_project_id": None,
             "current_project_name": None,
             "recent_task_ids": [],
+            "projects_list": [],  # full list from last list_projects call
         }
 
         for msg in history:
             meta = msg.get("metadata", {})
-            if not isinstance(meta, dict):
-                continue
+            content = msg.get("content", "")
 
-            if meta.get("project_id"):
-                context["current_project_id"] = meta["project_id"]
-                context["current_project_name"] = meta.get("project_name")
+            # ── Extract from metadata (set by graph.py) ──
+            if isinstance(meta, dict):
+                if meta.get("project_id"):
+                    context["current_project_id"] = meta["project_id"]
+                if meta.get("project_name"):
+                    context["current_project_name"] = meta["project_name"]
+                if meta.get("task_id"):
+                    tid = meta["task_id"]
+                    if tid not in context["recent_task_ids"]:
+                        context["recent_task_ids"].append(tid)
 
-            if meta.get("task_id"):
-                tid = meta["task_id"]
-                if tid not in context["recent_task_ids"]:
-                    context["recent_task_ids"].append(tid)
+            # ── Extract from tool output embedded in assistant messages ──
+            if msg.get("role") == "assistant" and content:
+                # Parse structured projects JSON embedded by list_projects tool
+                json_match = re.search(r"__projects_json__:(\[.+?\])", content)
+                if json_match:
+                    try:
+                        projects = json.loads(json_match.group(1))
+                        context["projects_list"] = projects
+                        # Auto-set first project as current if none set yet
+                        if projects and not context["current_project_id"]:
+                            context["current_project_id"] = projects[0]["id"]
+                            context["current_project_name"] = projects[0]["name"]
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
+                # Extract project IDs from bracketed numbers in content e.g. [12345678]
+                if not context["current_project_id"]:
+                    pid_matches = re.findall(r"\[(\d{6,})\]", content)
+                    if pid_matches:
+                        context["current_project_id"] = pid_matches[0]
+
+                # Extract project name from numbered list format
+                if not context["current_project_name"] and context["current_project_id"]:
+                    name_match = re.search(
+                        rf"\[{re.escape(context['current_project_id'])}\]\s+(.+?)\s+—",
+                        content
+                    )
+                    if name_match:
+                        context["current_project_name"] = name_match.group(1).strip()
+
+                # Extract task IDs from task list output e.g. [987654321]
+                task_matches = re.findall(r"\[(\d{8,})\]", content)
+                for tid in task_matches:
+                    if tid != context.get("current_project_id") and tid not in context["recent_task_ids"]:
+                        context["recent_task_ids"].append(tid)
+
+        # ── Fall back to long-term memory if session has no project ──
+        if not context["current_project_id"]:
+            lt_memories = await self.get_long_term("context")
+            for m in lt_memories:
+                if m["key"] == "last_project_id":
+                    context["current_project_id"] = m["value"]
+                if m["key"] == "last_project_name":
+                    context["current_project_name"] = m["value"]
 
         return context

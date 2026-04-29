@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+import logging
 
 from app.database import get_db
 from app.auth.middleware import get_current_user
@@ -9,6 +10,7 @@ from app.zoho.client import ZohoClient
 from app.memory.memory_store import MemoryStore
 from app.agents.graph import ZohoChatGraph
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
@@ -19,7 +21,6 @@ async def chat(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Main chat endpoint."""
     try:
         zoho_client = ZohoClient(user=user, db=db)
         memory_store = MemoryStore(db=db, user_id=user.id)
@@ -36,27 +37,40 @@ async def chat(
             pending_action=getattr(request, "pending_action", None),
         )
 
-        # 🔥 FIX: Normalize result safely (dict OR object)
+        # 🔍 Log raw result to see what graph returns
+        logger.warning(f"[GRAPH RAW RESULT] type={type(result)} value={result}")
+
+        # Normalize result safely (dict OR object)
         if isinstance(result, dict):
             data = result
         else:
-            data = getattr(result, "__dict__", {})
+            data = vars(result) if hasattr(result, '__dict__') else {}
 
-        if not data:
-            raise HTTPException(
-                status_code=500,
-                detail="Invalid response from chatbot graph"
-            )
+        logger.warning(f"[GRAPH DATA] {data}")
+
+        # Try multiple possible keys for the response text
+        response_text = (
+            data.get("response")
+            or data.get("message")
+            or data.get("content")
+            or data.get("output")
+            or data.get("answer")
+            or ""
+        )
+
+        if not response_text:
+            logger.error(f"[EMPTY RESPONSE] graph returned no text. data keys: {list(data.keys())}")
+            response_text = "I received your message but couldn't generate a response. Please try again."
 
         return ChatResponse(
-            response=data.get("response", ""),
+            response=response_text,
             requires_confirmation=data.get("requires_confirmation", False),
             pending_action=data.get("pending_action"),
             session_id=request.session_id,
         )
 
     except Exception as e:
-        # Optional: log error here if needed
+        logger.exception(f"[CHAT ERROR] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -66,7 +80,6 @@ async def get_history(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Get chat history for a session."""
     memory = MemoryStore(db=db, user_id=user.id)
     history = await memory.get_session_history(session_id)
     return {"history": history}
