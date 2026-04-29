@@ -64,18 +64,31 @@ class ZohoClient:
     async def get_portal_id(self) -> str:
         if self._portal_id:
             return self._portal_id
+
         data = await self._get("/portals/")
-        portals = data.get("login_portal", [])
+        portals = data.get("portals", [])
+
         if not portals:
             raise ValueError("No Zoho Projects portal found for this account")
+
         self._portal_id = portals[0]["id"]
         return self._portal_id
 
     # ─── Tool 1: list_projects ───────────────────────────────────────────────
-    async def list_projects(self) -> list[dict]:
+    async def list_projects(self) -> str:
         portal_id = await self.get_portal_id()
         data = await self._get(f"/portal/{portal_id}/projects/")
-        return data.get("projects", [])
+
+        projects = data.get("projects", [])
+
+        if not projects:
+            return "No projects found."
+
+        result = []
+        for i, p in enumerate(projects, 1):
+            result.append(f"{i}. {p.get('name')} (ID: {p.get('id')})")
+
+        return "\n".join(result)
 
     # ─── Tool 2: list_tasks ──────────────────────────────────────────────────
     async def list_tasks(

@@ -4,7 +4,6 @@ import { useState, useCallback, useRef } from 'react';
 import { Message, PendingAction } from '@/lib/types';
 import { sendMessage } from '@/lib/api';
 
-// Simple ID generator
 function makeId() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
@@ -83,8 +82,6 @@ export function useChat(sessionId: string) {
   const confirm = useCallback(async () => {
     const action = pendingRef.current;
 
-    setPendingAction(null);
-    pendingRef.current = null;
     setIsLoading(true);
     setError(null);
 
@@ -99,6 +96,10 @@ export function useChat(sessionId: string) {
       );
 
       addMessage('assistant', result.response);
+
+      // ✅ CLEAR AFTER SUCCESS
+      pendingRef.current = null;
+      setPendingAction(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Action failed';
       setError(msg);
@@ -111,8 +112,6 @@ export function useChat(sessionId: string) {
   const cancel = useCallback(async () => {
     const action = pendingRef.current;
 
-    setPendingAction(null);
-    pendingRef.current = null;
     setIsLoading(true);
 
     addMessage('user', 'No, cancel.');
@@ -122,10 +121,14 @@ export function useChat(sessionId: string) {
         'no',
         sessionId,
         false,
-        action as unknown as Record<string, unknown> | undefined
+        action as unknown as Record<string, unknown>
       );
 
       addMessage('assistant', result.response);
+
+      // ✅ CLEAR AFTER CANCEL
+      pendingRef.current = null;
+      setPendingAction(null);
     } catch {
       addMessage('assistant', '❌ Action cancelled.');
     } finally {

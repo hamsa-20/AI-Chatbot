@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from app.database import init_db
 from app.api.auth_routes import router as auth_router
-from app.api.chat_routes import router as chat_router
+from app.api.chat_routes import router as chat_routes
 from app.config import get_settings
 
 settings = get_settings()
@@ -32,7 +32,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
-app.include_router(chat_router)
+app.include_router(chat_routes)
 
 
 @app.get("/health")

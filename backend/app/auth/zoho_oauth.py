@@ -70,29 +70,43 @@ class ZohoOAuth:
 
         print("API DOMAIN:", api_domain)
 
-        # ✅ Use portal_id from .env (no API call)
+        # Use portal_id from .env as the stable user identifier
         portal_id = settings.zoho_portal_id
-
         user_id = str(portal_id)
-        email = ""
         display_name = "Zoho User"
 
         token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
 
+        # --- FIX: Try lookup by ID first, then fall back to any existing user row ---
+        # This handles the case where a row exists with a conflicting empty email
+        user = None
+
+        # 1. Try to find by primary key (user_id / portal_id)
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
 
+        # 2. If not found by ID, check if a row exists with email="" to avoid
+        #    the UNIQUE constraint error on re-login after a DB reset
+        if user is None:
+            result = await db.execute(select(User).where(User.email == ""))
+            user = result.scalar_one_or_none()
+
         if user:
+            # Update existing user — never change the email if it's already set
+            user.id = user_id  # Correct the ID if it was fetched via email fallback
             user.access_token = access_token
             if refresh_token:
                 user.refresh_token = refresh_token
             user.token_expires_at = token_expires_at
             user.zoho_api_domain = api_domain
+            user.display_name = display_name
             user.updated_at = datetime.utcnow()
         else:
+            # Create new user — use None for email to avoid UNIQUE constraint
+            # issues with empty strings across multiple potential rows
             user = User(
                 id=user_id,
-                email=email,
+                email=None,          # None (NULL) avoids UNIQUE constraint collisions
                 display_name=display_name,
                 access_token=access_token,
                 refresh_token=refresh_token,
@@ -101,8 +115,13 @@ class ZohoOAuth:
             )
             db.add(user)
 
-        await db.commit()
-        await db.refresh(user)
+        try:
+            await db.commit()
+            await db.refresh(user)
+        except Exception as e:
+            await db.rollback()
+            print(f"DB commit failed: {e}")
+            raise
 
         return user
 

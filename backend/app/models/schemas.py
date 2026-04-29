@@ -6,7 +6,8 @@ from datetime import datetime
 class ChatRequest(BaseModel):
     message: str
     session_id: str
-    confirmation: Optional[bool] = None  # For HIL confirmation
+    confirmation: Optional[bool] = None
+    pending_action: Optional[dict] = None  # ← ADD THIS LINE
 
 
 class ChatResponse(BaseModel):

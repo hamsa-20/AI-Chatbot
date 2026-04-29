@@ -1,5 +1,5 @@
 import json
-import uuid
+import re
 from typing import TypedDict, Annotated, Optional
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -24,6 +24,7 @@ class AgentState(TypedDict):
     requires_confirmation: bool
     long_term_context: str
     session_context: dict
+    current_user_message: str   # ← router reads THIS, not messages[-1]
 
 
 class ZohoChatGraph:
@@ -44,87 +45,81 @@ class ZohoChatGraph:
         action_llm = self.llm.bind_tools(self.action_tools)
 
         async def router_node(state: AgentState) -> AgentState:
-            last_message = state["messages"][-1].content if state["messages"] else ""
+            # Always use current_user_message so router never reads stale history
+            user_msg = state.get("current_user_message", "")
 
-            prompt = f"""Classify this as 'query' or 'action'.
-
-Message: "{last_message}"
-Answer ONLY 'query' or 'action'."""
-
+            prompt = (
+                "Classify this user request as exactly 'query' or 'action'.\n\n"
+                "query = read-only: list projects, list tasks, get details, members, reports.\n"
+                "action = write: create task, update task, delete task, assign task.\n\n"
+                f"User: \"{user_msg}\"\n\n"
+                "Reply with ONE word only: query or action"
+            )
             response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            content = response.content.lower().strip()
-
-            if "action" in content:
-                agent = "action"
-            else:
-                agent = "query"
-
+            agent = "action" if "action" in response.content.lower().strip() else "query"
             return {**state, "current_agent": agent}
 
         async def query_agent_node(state: AgentState) -> AgentState:
-            system_prompt = f"""You are Query Agent. Only read operations."""
-
-            messages = [SystemMessage(content=system_prompt)] + state["messages"]
-            response = await query_llm.ainvoke(messages)
+            system = SystemMessage(content=(
+                "You are a Zoho Projects AI assistant (read-only mode).\n"
+                "Answer using the available tools. Be concise.\n\n"
+                f"Long-term context:\n{state.get('long_term_context', 'None')}\n\n"
+                f"Session context:\n"
+                f"- Project ID: {state.get('session_context', {}).get('current_project_id', 'None')}\n"
+                f"- Project name: {state.get('session_context', {}).get('current_project_name', 'None')}"
+            ))
+            response = await query_llm.ainvoke([system] + state["messages"])
             return {**state, "messages": [response]}
 
         async def action_agent_node(state: AgentState) -> AgentState:
-            system_prompt = f"""You are Action Agent. Only write operations."""
-
-            messages = [SystemMessage(content=system_prompt)] + state["messages"]
-            response = await action_llm.ainvoke(messages)
+            system = SystemMessage(content=(
+                "You are a Zoho Projects AI assistant (write mode).\n"
+                "Handle create / update / delete operations using the available tools.\n\n"
+                f"Long-term context:\n{state.get('long_term_context', 'None')}\n\n"
+                f"Session context:\n"
+                f"- Project ID: {state.get('session_context', {}).get('current_project_id', 'None')}\n"
+                f"- Project name: {state.get('session_context', {}).get('current_project_name', 'None')}\n\n"
+                "When a tool returns requires_confirmation=true, tell the user exactly what will happen "
+                "and ask them to reply YES or NO."
+            ))
+            response = await action_llm.ainvoke([system] + state["messages"])
             return {**state, "messages": [response]}
 
         async def tool_executor_node(state: AgentState) -> AgentState:
             last = state["messages"][-1]
-
             if not hasattr(last, "tool_calls") or not last.tool_calls:
                 return state
 
             tool_node = ToolNode(self.all_tools)
             result = await tool_node.ainvoke(state)
-
-            # SAFE handling
-            if isinstance(result, dict):
-                data = result
-            else:
-                data = getattr(result, "__dict__", {})
-
-            new_messages = data.get("messages", [])
+            new_messages = result.get("messages", []) if isinstance(result, dict) else []
 
             for msg in new_messages:
-                if hasattr(msg, "content"):
-                    try:
-                        parsed = json.loads(msg.content)
-                        if parsed.get("requires_confirmation"):
-                            return {
-                                **state,
-                                "messages": new_messages,
-                                "pending_action": parsed,
-                                "requires_confirmation": True,
-                            }
-                    except:
-                        continue
+                content = getattr(msg, "content", None)
+                if not content:
+                    continue
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict) and parsed.get("requires_confirmation"):
+                        return {
+                            **state,
+                            "messages": new_messages,
+                            "pending_action": parsed,
+                            "requires_confirmation": True,
+                        }
+                except (json.JSONDecodeError, TypeError):
+                    continue
 
-            return {
-                **state,
-                "messages": new_messages,
-                "requires_confirmation": False,
-            }
+            return {**state, "messages": new_messages, "requires_confirmation": False}
 
-        def should_use_tools(state: AgentState):
+        def should_use_tools(state: AgentState) -> str:
             last = state["messages"][-1]
-            if hasattr(last, "tool_calls") and last.tool_calls:
-                return "tools"
-            return "end"
+            return "tools" if hasattr(last, "tool_calls") and last.tool_calls else "end"
 
-        def after_tools(state: AgentState):
-            if state.get("requires_confirmation"):
-                return "end"
-            return should_use_tools(state)
+        def after_tools(state: AgentState) -> str:
+            return "end" if state.get("requires_confirmation") else should_use_tools(state)
 
         graph = StateGraph(AgentState)
-
         graph.add_node("router", router_node)
         graph.add_node("query_agent", query_agent_node)
         graph.add_node("action_agent", action_agent_node)
@@ -137,7 +132,6 @@ Answer ONLY 'query' or 'action'."""
             lambda s: s["current_agent"],
             {"query": "query_agent", "action": "action_agent"},
         )
-
         graph.add_conditional_edges("query_agent", should_use_tools, {"tools": "tool_executor", "end": END})
         graph.add_conditional_edges("action_agent", should_use_tools, {"tools": "tool_executor", "end": END})
         graph.add_conditional_edges("tool_executor", after_tools, {"tools": "tool_executor", "end": END})
@@ -152,35 +146,72 @@ Answer ONLY 'query' or 'action'."""
         confirmation: Optional[bool] = None,
         pending_action: Optional[dict] = None,
     ) -> dict:
+        # Step 1: Recover pending_action from history FIRST before anything else
+        if pending_action is None:
+            raw_history = await self.memory_store.get_session_history(session_id)
+            for msg in reversed(raw_history):
+                meta = msg.get("metadata", {})
+                if isinstance(meta, dict) and meta.get("pending_action"):
+                    pending_action = meta["pending_action"]
+                    break
 
-        long_term = await self.memory_store.get_long_term_summary()
+        # Step 2: THEN normalise yes/no (now pending_action is already set)
+        normalized = user_message.strip().lower()
+        if normalized in {"yes", "yes, confirm", "confirm", "y"}:
+            confirmation = True
+        elif normalized in {"no", "cancel", "n"}:
+            confirmation = False
+
+        # Step 3: Confirmed — execute directly
+        if confirmation is True and pending_action:
+            result_msg = await self._execute_action(pending_action)
+            await self.memory_store.save_message(session_id, "user", user_message)
+            await self.memory_store.save_message(session_id, "assistant", result_msg)
+            return {"response": result_msg, "requires_confirmation": False, "pending_action": None}
+
+        # Step 4: Cancelled
+        if confirmation is False:
+            cancel_msg = "❌ Action cancelled. No changes were made."
+            await self.memory_store.save_message(session_id, "user", user_message)
+            await self.memory_store.save_message(session_id, "assistant", cancel_msg)
+            return {"response": cancel_msg, "requires_confirmation": False, "pending_action": None}
+
+        # Context-aware message rewriting
         session_context = await self.memory_store.get_session_context(session_id)
-        history = await self.memory_store.get_session_history(session_id)
 
+        if "first" in user_message.lower() and session_context.get("current_project_id"):
+            user_message = f"show tasks for project {session_context['current_project_id']}"
+
+        if "delete" in user_message.lower():
+            match = re.search(r"#?(\d+)", user_message)
+            if match and session_context.get("current_project_id"):
+                user_message = (
+                    f"delete task {match.group(1)} "
+                    f"in project {session_context['current_project_id']}"
+                )
+
+        if "most tasks" in user_message.lower() and session_context.get("current_project_id"):
+            user_message = f"get task utilisation for project {session_context['current_project_id']}"
+
+        # Fetch history BEFORE saving the new message (avoids duplication)
+        history = await self.memory_store.get_session_history(session_id)
         await self.memory_store.save_message(session_id, "user", user_message)
 
-        messages = []
+        # Build LangChain message list from PREVIOUS history only
+        lc_messages: list[BaseMessage] = []
         for msg in history:
             if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            else:
-                messages.append(AIMessage(content=msg["content"]))
+                lc_messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                lc_messages.append(AIMessage(content=msg["content"]))
 
-        messages.append(HumanMessage(content=user_message))
+        # Append the new user message ONCE at the end
+        lc_messages.append(HumanMessage(content=user_message))
 
-        # HANDLE CONFIRMATION
-        if confirmation is True and pending_action:
-            result = await self._execute_action(pending_action)
-            await self.memory_store.save_message(session_id, "assistant", result)
-            return {"response": result, "requires_confirmation": False, "pending_action": None}
-
-        if confirmation is False and pending_action:
-            msg = "❌ Action cancelled."
-            await self.memory_store.save_message(session_id, "assistant", msg)
-            return {"response": msg, "requires_confirmation": False, "pending_action": None}
+        long_term = await self.memory_store.get_long_term_summary()
 
         initial_state: AgentState = {
-            "messages": messages,
+            "messages": lc_messages,
             "user_id": user_id,
             "session_id": session_id,
             "current_agent": "query",
@@ -188,39 +219,45 @@ Answer ONLY 'query' or 'action'."""
             "requires_confirmation": False,
             "long_term_context": long_term,
             "session_context": session_context,
+            "current_user_message": user_message,  # router reads this
         }
 
         result = await self.graph.ainvoke(initial_state, config={"recursion_limit": 25})
 
-        # SAFE normalize
-        if isinstance(result, dict):
-            data = result
-        else:
-            data = getattr(result, "__dict__", {})
-
-        response_messages = data.get("messages", [])
-        pending = data.get("pending_action")
-        requires_conf = data.get("requires_confirmation", False)
+        result_dict = result if isinstance(result, dict) else {}
+        pending = result_dict.get("pending_action")
+        requires_conf = result_dict.get("requires_confirmation", False)
 
         last_msg = ""
-        for msg in reversed(response_messages):
+        for msg in reversed(result_dict.get("messages", [])):
             if isinstance(msg, AIMessage) and msg.content:
                 last_msg = msg.content
                 break
 
         if requires_conf and pending:
-            last_msg = f"""⚠️ Confirmation Required
+            last_msg = (
+                f"⚠️ **Confirmation Required**\n\n"
+                f"I'm about to: **{pending.get('summary', 'perform an action')}**\n\n"
+                f"Reply **YES** to confirm or **NO** to cancel."
+            )
 
-{pending.get('summary')}
-
-Reply YES to confirm or NO to cancel."""
+        save_meta: dict = {}
+        if pending:
+            save_meta["pending_action"] = pending
+            details = pending.get("details", {})
+            if details.get("project_id"):
+                save_meta["project_id"] = details["project_id"]
+            if details.get("task_id"):
+                save_meta["task_id"] = details["task_id"]
 
         await self.memory_store.save_message(
-            session_id,
-            "assistant",
-            last_msg,
-            metadata={"pending_action": pending} if pending else {},
+            session_id, "assistant", last_msg, metadata=save_meta
         )
+
+        if session_context.get("current_project_id"):
+            await self.memory_store.save_long_term(
+                "context", "last_project_id", session_context["current_project_id"]
+            )
 
         return {
             "response": last_msg,
@@ -231,17 +268,16 @@ Reply YES to confirm or NO to cancel."""
     async def _execute_action(self, pending_action: dict) -> str:
         action = pending_action.get("action")
         details = pending_action.get("details", {})
-
         try:
             if action == "create_task":
                 res = await self.zoho_client.create_task(**details)
-                return f"Task created: {res.get('id')}"
+                return f"✅ Task **'{res.get('name', details.get('name'))}'** created! ID: `{res.get('id')}`"
             elif action == "update_task":
                 await self.zoho_client.update_task(**details)
-                return "Task updated"
+                return f"✅ Task `{details.get('task_id')}` updated successfully!"
             elif action == "delete_task":
                 await self.zoho_client.delete_task(details["project_id"], details["task_id"])
-                return "Task deleted"
-            return "Unknown action"
+                return f"✅ Task `{details.get('task_id')}` has been permanently deleted."
+            return f"❌ Unknown action type: `{action}`"
         except Exception as e:
-            return f"Error: {str(e)}"
+            return f"❌ Action failed: {str(e)}"
